@@ -4,6 +4,7 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 module Database.InfluxDB.Types
   ( -- * Series, columns and data points
@@ -23,6 +24,9 @@ module Database.InfluxDB.Types
   , Ping(..)
   , Interface
   , ShardSpace(..)
+  , Results(..)
+  , NewSeries(..)
+  , SeriesWrapper (..)
 
   -- * Server pool
   , ServerPool
@@ -38,6 +42,7 @@ module Database.InfluxDB.Types
   , InfluxException(..)
   , jsonDecodeError
   , seriesDecodeError
+  , parseDatabase
   ) where
 
 import Control.Applicative (empty)
@@ -50,6 +55,7 @@ import Data.Sequence (Seq, ViewL(..), (|>))
 import Data.Text (Text)
 import Data.Typeable (Typeable)
 import Data.Vector (Vector)
+import qualified Data.Vector as V
 import Data.Word (Word32)
 import GHC.Generics (Generic)
 import qualified Data.Sequence as Seq
@@ -57,9 +63,12 @@ import qualified Data.Sequence as Seq
 import Control.Retry (RetryPolicy(..), limitRetries, exponentialBackoff)
 import Data.Aeson ((.=), (.:))
 import Data.Aeson.TH
+import Data.Aeson.Types (Parser)
 import qualified Data.Aeson as A
 
 import Database.InfluxDB.Types.Internal (stripPrefixOptions)
+
+import Debug.Trace
 
 #if MIN_VERSION_aeson(0, 7, 0)
 import Data.Scientific
@@ -214,6 +223,17 @@ newtype Database = Database
   { databaseName :: Text
   } deriving (Show, Typeable, Generic)
 
+parseDatabase :: A.Value -> Parser [Database]
+parseDatabase = A.withObject "results" $ \ o -> do
+  A.Array vec <- o .: "results"
+  A.withObject "series" (\ obj -> do
+    A.Array series <- obj .: "series"
+    A.withObject "inner series" (\ s -> do
+      A.Array values <- s .: "values"
+      return $ fmap (\ (A.String t) -> Database t) $ V.toList values
+      ) (series V.! 0)
+    ) $ trace (show vec) (vec V.! 0)
+
 -- | User
 data User = User
   { userName :: Text
@@ -240,6 +260,23 @@ data ShardSpace = ShardSpace
   , shardSpaceReplicationFactor :: Word32
   , shardSpaceSplit :: Word32
   } deriving (Show, Typeable, Generic)
+
+data Results = Results{
+  resultsResults :: [SeriesWrapper],
+  resultsError :: Maybe Text
+} deriving (Show, Typeable, Generic)
+
+
+data SeriesWrapper = SeriesWrapper {
+  serieswrapperSeries :: Maybe [NewSeries]
+} deriving (Show, Typeable, Generic)
+
+data NewSeries = NewSeries{
+  newseriesName :: Maybe Text,
+  newseriesTags :: Maybe [(Text,Text)],
+  newseriesColumns :: Maybe [Text],
+  newseriesValues :: [[Value]]
+} deriving (Show, Typeable, Generic)
 
 -----------------------------------------------------------
 -- Server pool manipulation
@@ -305,8 +342,10 @@ seriesDecodeError = throwIO . SeriesDecodeError
 -----------------------------------------------------------
 -- Aeson instances
 
-deriveFromJSON (stripPrefixOptions "database") ''Database
 deriveFromJSON (stripPrefixOptions "admin") ''Admin
 deriveFromJSON (stripPrefixOptions "user") ''User
 deriveFromJSON (stripPrefixOptions "ping") ''Ping
 deriveFromJSON (stripPrefixOptions "shardSpace") ''ShardSpace
+deriveFromJSON (stripPrefixOptions "results") ''Results
+deriveFromJSON (stripPrefixOptions "newseries") ''NewSeries
+deriveFromJSON (stripPrefixOptions "serieswrapper") ''SeriesWrapper

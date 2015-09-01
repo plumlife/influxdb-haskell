@@ -102,7 +102,9 @@ test-suite test-suite
   type: exitcode-stdio-1.0
   main-is: test-suite.hs
   build-depends:
-      base
+      aeson
+    , base
+    , containers
     , http-client
     , HUnit
     , influxdb

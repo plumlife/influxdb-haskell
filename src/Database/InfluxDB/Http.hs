@@ -12,10 +12,11 @@ module Database.InfluxDB.Http
   , TimePrecision(..)
 
   -- * Writing Data
-
+  , formatLine
+  , formatLines
   -- ** Updating Points
   , post, postWithPrecision
-  , SeriesT, PointT
+  , SeriesT, PointT, Line(..)
   , writeSeries
   , writeSeriesData
   , withSeries
@@ -35,34 +36,18 @@ module Database.InfluxDB.Http
   , createDatabase
   , dropDatabase
 
-  , DatabaseRequest(..)
-  , configureDatabase
 
   -- ** Security
-  -- *** Shard spaces
-  , ShardSpaceRequest(..)
-  , listShardSpaces
-  , createShardSpace
-  , dropShardSpace
-
-  -- *** Cluster admin
-  , listClusterAdmins
-  , authenticateClusterAdmin
-  , addClusterAdmin
-  , updateClusterAdminPassword
-  , deleteClusterAdmin
   -- *** Database user
-  , listDatabaseUsers
-  , authenticateDatabaseUser
-  , addDatabaseUser
-  , updateDatabaseUserPassword
-  , deleteDatabaseUser
+  , listUsers
+  , addUser
+  , updateUserPassword
+  , deleteUser
   , grantAdminPrivilegeTo
   , revokeAdminPrivilegeFrom
 
   -- ** Other API
   , ping
-  , isInSync
   ) where
 
 import Control.Applicative
@@ -70,6 +55,7 @@ import Control.Monad.Identity
 import Control.Monad.Writer
 import Data.DList (DList)
 import Data.IORef
+import Data.Maybe (fromJust)
 import Data.Proxy
 import Data.Text (Text)
 import Data.Vector (Vector)
@@ -79,7 +65,12 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.DList as DL
+import Data.Int
+import qualified Data.List as L
+import Data.Map (Map)
+import qualified Data.Map as M
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Text.Printf (printf)
 import Prelude
 
@@ -138,51 +129,71 @@ timePrecString MicrosecondsPrecision = "u"
 -----------------------------------------------------------
 -- Writing Data
 
+data Line = Line {
+  lineMeasurement :: Text,
+  lineTags :: Map Text Text,
+  lineFields :: Map Text Value,
+  linePrecision :: Maybe Int64
+}
+
+formatLine :: Line -> BL.ByteString
+formatLine line = BL.concat[BL.fromStrict $ TE.encodeUtf8 $ lineMeasurement line,formatedTags, " ", formatedValues, maybe "" (\ x -> BL.fromStrict $ BS8.concat[" ", BS8.pack $ show x]) $ linePrecision line]
+  where
+    formatedTags =
+      case M.null $ lineTags line of
+        True -> ""
+        False -> BL.concat $ [","] ++ (L.intersperse "," $ fmap (\ (key,value) -> BL.fromStrict $ TE.encodeUtf8 $ T.concat [key,"=",value] ) $ M.toList $ lineTags line)
+    formatedValues = BL.concat $ L.intersperse "," $ fmap (\ (key,value) -> BL.concat[BL.fromStrict $ TE.encodeUtf8 key,"=",BL.fromStrict $ formatValue value]) $ M.toList $ lineFields line
+
+    formatValue (Int val) = BS8.pack $ concat[show val,"i"]
+    formatValue (String val) = BS8.pack $ concat ["\"",T.unpack val,"\""]
+    formatValue (Float val) = BS8.pack $ show val
+    formatValue (Bool True) = BS8.pack "t"
+    formatValue (Bool False) = BS8.pack "f"
+
+formatLines :: [Line] -> BL.ByteString
+formatLines x = BL.concat $ fmap formatLine x
+
+
 -- | Post a bunch of writes for (possibly multiple) series into a database.
 post
   :: Config
   -> Text
-  -> SeriesT IO a
-  -> IO a
-post config databaseName =
-  postGeneric config databaseName Nothing
+  -> Line
+  -> IO ()
+post config databaseName d =
+  postGeneric config databaseName [d]
 
 -- | Post a bunch of writes for (possibly multiple) series into a database like
 -- 'post' but with time precision.
 postWithPrecision
   :: Config
   -> Text -- ^ Database name
-  -> TimePrecision
-  -> SeriesT IO a
-  -> IO a
-postWithPrecision config databaseName timePrec =
-  postGeneric config databaseName (Just timePrec)
+  -> [Line]
+  -> IO ()
+postWithPrecision config databaseName =
+  postGeneric config databaseName
 
 postGeneric
   :: Config
   -> Text -- ^ Database name
-  -> Maybe TimePrecision
-  -> SeriesT IO a
-  -> IO a
-postGeneric Config {..} databaseName timePrec write = do
-  (a, series) <- runSeriesT write
+  -> [Line]
+  -> IO ()
+postGeneric Config {..} databaseName write = do
   void $ httpLbsWithRetry configServerPool
-    (makeRequest series)
+    (makeRequest write)
     configHttpManager
-  return a
+  return ()
   where
     makeRequest series = def
       { HC.method = "POST"
-      , HC.requestBody = HC.RequestBodyLBS $ AE.encode series
-      , HC.path = escapeString $ printf "/db/%s/series"
+      , HC.requestBody = HC.RequestBodyLBS $ formatLines series
+      , HC.path = escapeString $ printf "/write"
           (T.unpack databaseName)
-      , HC.queryString = escapeString $ printf "u=%s&p=%s%s"
+      , HC.queryString = escapeString $ printf "u=%s&p=%s&db=%s"
           (T.unpack credsUser)
           (T.unpack credsPassword)
-          (maybe
-            ""
-            (printf "&time_precision=%s" . timePrecString)
-            timePrec :: String)
+          (T.unpack databaseName)
       }
     Credentials {..} = configCreds
 
@@ -350,30 +361,44 @@ queryChunked Config {..} databaseName q f =
 -- Administration & Security
 
 -- | List existing databases.
-listDatabases :: Config -> IO [Database]
-listDatabases config = runRequest config request
-  where
+listDatabases :: Config -> IO [Database]-- [Database]
+listDatabases Config {..} = do
+  response <- httpLbsWithRetry configServerPool request configHttpManager
+  let parsed :: Maybe Results = A.decode $ HC.responseBody response
+  case parsed of
+    Just x ->
+      return $ L.concat $ fmap (\ y ->
+        case serieswrapperSeries y of
+          Just z -> L.concat $ fmap (fmap Database . convertList . L.concat . newseriesValues) z
+          Nothing -> []) $ resultsResults x
+    Nothing -> return []
+    where
     request = def
-      { HC.path = "/db"
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
+      { HC.path = "/query"
+      , HC.queryString = escapeString $ printf "u=%s&p=%s&q=SHOW DATABASES"
           (T.unpack credsUser)
           (T.unpack credsPassword)
       }
-    Credentials {..} = configCreds config
+    Credentials {..} = configCreds
+
+    convertList :: [Value] -> [Text]
+    convertList = fmap (\ (String x) -> x) . L.filter predicate
+
+    predicate (String _) = True
+    predicate _ = False
+
 
 -- | Create a new database. Requires cluster admin privileges.
 createDatabase :: Config -> Text -> IO ()
 createDatabase config name = runRequest_ config request
   where
     request = def
-      { HC.method = "POST"
-      , HC.requestBody = HC.RequestBodyLBS $ AE.encode $ A.object
-          [ "name" .= name
-          ]
-      , HC.path = "/db"
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
+      { HC.method = "GET"
+      , HC.path = "/query"
+      , HC.queryString = escapeString $ printf "u=%s&p=%s&q=CREATE DATABASE %s"
           (T.unpack credsUser)
           (T.unpack credsPassword)
+          (T.unpack name)
       }
     Credentials {..} = configCreds config
 
@@ -385,344 +410,138 @@ dropDatabase
 dropDatabase config databaseName = runRequest_ config request
   where
     request = def
-      { HC.method = "DELETE"
-      , HC.path = escapeString $ printf "/db/%s"
+      { HC.method = "GET"
+      , HC.path = "/query"
+      , HC.queryString = escapeString $ printf "u=%s&p=%s&q=DROP DATABASE %s"
+          (T.unpack credsUser)
+          (T.unpack credsPassword)
           (T.unpack databaseName)
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
-          (T.unpack credsUser)
-          (T.unpack credsPassword)
       }
     Credentials {..} = configCreds config
-
-
-data DatabaseRequest = DatabaseRequest
-  { databaseRequestSpaces :: [ShardSpaceRequest]
-  , databaseRequestContinuousQueries :: [Text]
-  } deriving Show
-
-configureDatabase
-  :: Config
-  -> Text -- ^ Database name
-  -> DatabaseRequest
-  -> IO ()
-configureDatabase config databaseName databaseRequest =
-  runRequest_ config request
-  where
-    request = def
-      { HC.method = "POST"
-      , HC.requestBody = HC.RequestBodyLBS $ AE.encode databaseRequest
-      , HC.path = escapeString $ printf "/cluster/database_configs/%s"
-          (T.unpack databaseName)
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
-          (T.unpack credsUser)
-          (T.unpack credsPassword)
-      }
-    Credentials {..} = configCreds config
-
--- | List shard spaces.
-listShardSpaces :: Config -> IO [ShardSpace]
-listShardSpaces config = runRequest config request
-  where
-    request = def
-      { HC.path = "/cluster/shard_spaces"
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
-          (T.unpack credsUser)
-          (T.unpack credsPassword)
-      }
-    Credentials {..} = configCreds config
-
-data ShardSpaceRequest = ShardSpaceRequest
-  { shardSpaceRequestName :: Text
-  , shardSpaceRequestRegex :: Text
-  , shardSpaceRequestRetentionPolicy :: Text
-  , shardSpaceRequestShardDuration :: Text
-  , shardSpaceRequestReplicationFactor :: Word32
-  , shardSpaceRequestSplit :: Word32
-  } deriving Show
-
--- | Create a shard space.
-createShardSpace
-  :: Config
-  -> Text -- ^ Database
-  -> ShardSpaceRequest
-  -> IO ()
-createShardSpace config databaseName shardSpace = runRequest_ config request
-  where
-    request = def
-      { HC.method = "POST"
-      , HC.requestBody = HC.RequestBodyLBS $ AE.encode shardSpace
-      , HC.path = escapeString $ printf "/cluster/shard_spaces/%s"
-          (T.unpack databaseName)
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
-          (T.unpack credsUser)
-          (T.unpack credsPassword)
-      }
-    Credentials {..} = configCreds config
-
-dropShardSpace
-  :: Config
-  -> Text -- ^ Database name
-  -> Text -- ^ Shard space name
-  -> IO ()
-dropShardSpace config databaseName shardSpaceName = runRequest_ config request
-  where
-    request = def
-      { HC.method = "DELETE"
-      , HC.path = escapeString $ printf "/cluster/shard_spaces/%s/%s"
-          (T.unpack databaseName)
-          (T.unpack shardSpaceName)
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
-          (T.unpack credsUser)
-          (T.unpack credsPassword)
-      }
-    Credentials {..} = configCreds config
-
--- | List cluster administrators.
-listClusterAdmins :: Config -> IO [Admin]
-listClusterAdmins config = runRequest config request
-  where
-    request = def
-      { HC.path = "/cluster_admins"
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
-          (T.unpack credsUser)
-          (T.unpack credsPassword)
-      }
-    Credentials {..} = configCreds config
-
-authenticateClusterAdmin :: Config -> IO ()
-authenticateClusterAdmin config = runRequest_ config request
-  where
-    request = def
-      { HC.path = "/cluster_admins/authenticate"
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
-          (T.unpack credsUser)
-          (T.unpack credsPassword)
-      }
-    Credentials {..} = configCreds config
-
--- | Add a new cluster administrator. Requires cluster admin privilege.
-addClusterAdmin
-  :: Config
-  -> Text -- ^ Admin name
-  -> Text -- ^ Password
-  -> IO Admin
-addClusterAdmin config name password = do
-  runRequest_ config request
-  return Admin
-    { adminName = name
-    }
-  where
-    request = def
-      { HC.method = "POST"
-      , HC.requestBody = HC.RequestBodyLBS $ AE.encode $ A.object
-          [ "name" .= name
-          , "password" .= password
-          ]
-      , HC.path = "/cluster_admins"
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
-          (T.unpack credsUser)
-          (T.unpack credsPassword)
-      }
-    Credentials {..} = configCreds config
-
--- | Update a cluster administrator's password. Requires cluster admin
--- privilege.
-updateClusterAdminPassword
-  :: Config
-  -> Admin
-  -> Text -- ^ New password
-  -> IO ()
-updateClusterAdminPassword Config {..} admin password =
-  void $ httpLbsWithRetry configServerPool makeRequest configHttpManager
-  where
-    makeRequest = def
-      { HC.method = "POST"
-      , HC.requestBody = HC.RequestBodyLBS $ AE.encode $ A.object
-          [ "password" .= password
-          ]
-      , HC.path = escapeString $ printf "/cluster_admins/%s"
-          (T.unpack adminName)
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
-          (T.unpack credsUser)
-          (T.unpack credsPassword)
-      }
-    Admin {adminName} = admin
-    Credentials {..} = configCreds
-
--- | Delete a cluster administrator. Requires cluster admin privilege.
-deleteClusterAdmin
-  :: Config
-  -> Admin
-  -> IO ()
-deleteClusterAdmin Config {..} admin =
-  void $ httpLbsWithRetry configServerPool makeRequest configHttpManager
-  where
-    makeRequest = def
-      { HC.method = "DELETE"
-      , HC.path = escapeString $ printf "/cluster_admins/%s"
-          (T.unpack adminName)
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
-          (T.unpack credsUser)
-          (T.unpack credsPassword)
-      }
-    Admin {adminName} = admin
-    Credentials {..} = configCreds
 
 -- | List database users.
-listDatabaseUsers
+listUsers
   :: Config
-  -> Text
   -> IO [User]
-listDatabaseUsers config@Config {..} database = runRequest config makeRequest
-  where
-    makeRequest = def
-      { HC.path = escapeString $ printf "/db/%s/users"
-          (T.unpack database)
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
+listUsers config@Config {..} = do
+  response <- httpLbsWithRetry configServerPool request configHttpManager
+  let parsed :: Maybe Results = A.decode $ HC.responseBody response
+  case parsed of
+    Just x ->
+      return $ L.concat $ fmap (\ y ->
+        case serieswrapperSeries y of
+          Just z -> L.concat $ fmap (fmap(\ (a,b) -> User a b) . fmap convertList . newseriesValues) z
+          Nothing -> []) $ resultsResults x
+    Nothing -> return []
+    where
+    request = def
+      { HC.path = "/query"
+      , HC.queryString = escapeString $ printf "u=%s&p=%s&q=SHOW USERS"
           (T.unpack credsUser)
           (T.unpack credsPassword)
       }
     Credentials {..} = configCreds
 
-authenticateDatabaseUser
-  :: Config
-  -> Text -- ^ Database name
-  -> IO ()
-authenticateDatabaseUser Config {..} database =
-  void $ httpLbsWithRetry configServerPool makeRequest configHttpManager
-  where
-    makeRequest = def
-      { HC.path = escapeString $ printf "/db/%s/authenticate"
-          (T.unpack database)
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
-          (T.unpack credsUser)
-          (T.unpack credsPassword)
-      }
-    Credentials {..} = configCreds
+    convertList :: [Value] -> (Text,Bool)
+    convertList [String x, Bool y] = (x,y)
 
 -- | Add an user to the database users.
-addDatabaseUser
+addUser
   :: Config
-  -> Text -- ^ Database name
   -> Text -- ^ User name
   -> Text -- ^ Password
   -> IO ()
-addDatabaseUser config databaseName name password = runRequest_ config request
+addUser config name password = runRequest_ config request
   where
     request = def
-      { HC.method = "POST"
-      , HC.requestBody = HC.RequestBodyLBS $ AE.encode $ A.object
-          [ "name" .= name
-          , "password" .= password
-          ]
-      , HC.path = escapeString $ printf "/db/%s/users"
-          (T.unpack databaseName)
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
+      { HC.method = "GET"
+      , HC.path = "/query"
+      , HC.queryString = escapeString $ printf "u=%s&p=%s&q=CREATE USER %s WITH PASSWORD '%s'"
           (T.unpack credsUser)
           (T.unpack credsPassword)
+          (T.unpack name)
+          (T.unpack $ T.replace "'" "\'" password)
       }
     Credentials {..} = configCreds config
 
 -- | Delete an user from the database users.
-deleteDatabaseUser
+deleteUser
   :: Config
-  -> Text -- ^ Database name
   -> Text -- ^ User name
   -> IO ()
-deleteDatabaseUser config databaseName userName = runRequest_ config request
+deleteUser config userName = runRequest_ config request
   where
-    request = (makeRequestFromDatabaseUser config databaseName userName)
-      { HC.method = "DELETE"
+    request = def
+      { HC.method = "GET"
+      , HC.path = "/query"
+      , HC.queryString = escapeString $ printf "u=%s&p=%s&q=DROP USER %s"
+          (T.unpack credsUser)
+          (T.unpack credsPassword)
+          (T.unpack userName)
       }
+    Credentials {..} = configCreds config
 
 -- | Update password for the database user.
-updateDatabaseUserPassword
+updateUserPassword
   :: Config
-  -> Text -- ^ Database name
   -> Text -- ^ User name
   -> Text -- ^ New password
   -> IO ()
-updateDatabaseUserPassword config databaseName userName password =
+updateUserPassword config userName password =
   runRequest_ config request
   where
-    request = (makeRequestFromDatabaseUser config databaseName userName)
-      { HC.method = "POST"
-      , HC.requestBody = HC.RequestBodyLBS $ AE.encode $ A.object
-          [ "password" .= password
-          ]
+    request = def
+      { HC.method = "GET"
+      , HC.path = "/query"
+      , HC.queryString = escapeString $ printf "u=%s&p=%s&q=SET PASSWORD FOR %s = '%s'"
+          (T.unpack credsUser)
+          (T.unpack credsPassword)
+          (T.unpack userName)
+          (T.unpack $ T.replace "'" "\'" password)
       }
+    Credentials {..} = configCreds config
 
 -- | Give admin privilege to the user.
 grantAdminPrivilegeTo
   :: Config
-  -> Text -- ^ Database name
   -> Text -- ^ User name
   -> IO ()
-grantAdminPrivilegeTo config databaseName userName = runRequest_ config request
+grantAdminPrivilegeTo config userName = runRequest_ config request
   where
-    request = (makeRequestFromDatabaseUser config databaseName userName)
-      { HC.method = "POST"
-      , HC.requestBody = HC.RequestBodyLBS $ AE.encode $ A.object
-          [ "admin" .= True
-          ]
+    request = def
+      { HC.method = "GET"
+      , HC.path = "/query"
+      , HC.queryString = escapeString $ printf "u=%s&p=%s&q=GRANT ALL PRIVILEGES TO %s"
+          (T.unpack credsUser)
+          (T.unpack credsPassword)
+          (T.unpack userName)
       }
+    Credentials {..} = configCreds config
 
 -- | Remove admin privilege from the user.
 revokeAdminPrivilegeFrom
   :: Config
-  -> Text -- ^ Database name
   -> Text -- ^ User name
   -> IO ()
-revokeAdminPrivilegeFrom config databaseName userName =
+revokeAdminPrivilegeFrom config userName =
   runRequest_ config request
   where
-    request = (makeRequestFromDatabaseUser config databaseName userName)
-      { HC.method = "POST"
-      , HC.requestBody = HC.RequestBodyLBS $ AE.encode $ A.object
-          [ "admin" .= False
-          ]
+    request = def
+      { HC.method = "GET"
+      , HC.path = "/query"
+      , HC.queryString = escapeString $ printf "u=%s&p=%s&q=REVOKE ALL PRIVILEGES FROM %s"
+          (T.unpack credsUser)
+          (T.unpack credsPassword)
+          (T.unpack userName)
       }
+    Credentials {..} = configCreds config
 
-makeRequestFromDatabaseUser
-  :: Config
-  -> Text -- ^ Database name
-  -> Text -- ^ User name
-  -> HC.Request
-makeRequestFromDatabaseUser Config {..} databaseName userName = def
-  { HC.path = escapeString $ printf "/db/%s/users/%s"
-      (T.unpack databaseName)
-      (T.unpack userName)
-  , HC.queryString = escapeString $ printf "u=%s&p=%s"
-      (T.unpack credsUser)
-      (T.unpack credsPassword)
-  }
-  where
-    Credentials {..} = configCreds
-
-ping :: Config -> IO Ping
+ping :: Config -> IO ()
 ping config = runRequest config request
   where
     request = def
       { HC.path = "/ping"
       }
-
-isInSync :: Config -> IO Bool
-isInSync Config {..} = do
-  response <- httpLbsWithRetry configServerPool makeRequest configHttpManager
-  case eitherDecodeBool (HC.responseBody response) of
-    Left reason -> jsonDecodeError reason
-    Right status -> return status
-  where
-    makeRequest = def
-      { HC.path = "/sync"
-      , HC.queryString = escapeString $ printf "u=%s&p=%s"
-          (T.unpack credsUser)
-          (T.unpack credsPassword)
-      }
-    Credentials {..} = configCreds
-    eitherDecodeBool lbs = do
-      val <- PL.eitherResult $ PL.parse AP.value lbs
-      AT.parseEither A.parseJSON val
 
 -----------------------------------------------------------
 
@@ -786,7 +605,3 @@ runRequest_ Config {..} req =
   void $ httpLbsWithRetry configServerPool req configHttpManager
 
 -----------------------------------------------------------
--- Aeson instances
-
-deriveToJSON (stripPrefixOptions "shardSpaceRequest") ''ShardSpaceRequest
-deriveToJSON (stripPrefixOptions "databaseRequest") ''DatabaseRequest

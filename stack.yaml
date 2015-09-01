@@ -1,0 +1,9 @@
+flags:
+  influxdb:
+    aeson-070: true
+    network-uri: true
+    examples: false
+packages:
+- '.'
+extra-deps: []
+resolver: lts-3.2

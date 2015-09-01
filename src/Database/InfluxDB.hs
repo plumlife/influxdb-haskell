@@ -35,10 +35,10 @@ module Database.InfluxDB
   , InfluxException(..)
 
   -- ** Writing Data
-
+  , formatLine
   -- *** Updating Points
   , post, postWithPrecision
-  , SeriesT, PointT
+  , SeriesT, PointT, Line(..)
   , writeSeries
   , writeSeriesData
   , withSeries
@@ -58,34 +58,17 @@ module Database.InfluxDB
   , createDatabase
   , dropDatabase
 
-  , DatabaseRequest(..)
-  , configureDatabase
-
   -- *** Security
-  -- **** Shard spaces
-  , ShardSpaceRequest(..)
-  , listShardSpaces
-  , createShardSpace
-  , dropShardSpace
-
-  -- **** Cluster admin
-  , listClusterAdmins
-  , authenticateClusterAdmin
-  , addClusterAdmin
-  , updateClusterAdminPassword
-  , deleteClusterAdmin
   -- **** Database user
-  , listDatabaseUsers
-  , authenticateDatabaseUser
-  , addDatabaseUser
-  , updateDatabaseUserPassword
-  , deleteDatabaseUser
+  , listUsers
+  , addUser
+  , updateUserPassword
+  , deleteUser
   , grantAdminPrivilegeTo
   , revokeAdminPrivilegeFrom
 
   -- *** Other API
   , ping
-  , isInSync
   ) where
 
 import Database.InfluxDB.Decode
