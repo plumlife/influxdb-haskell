@@ -131,12 +131,16 @@ case_parse_response = do
   let r :: Maybe Results = decode "{\"results\":[{\"series\":[{\"name\":\"databases\",\"columns\":[\"name\"],\"values\":[[\"test_109\"],[\"test_85\"]]}]}]}"
   assertBool "Decode Failed" $ isJust r
 
-case_query_nonexistent_series :: Assertion
-case_query_nonexistent_series = runTest $ \config ->
+
+
+case_post :: Assertion
+case_post = runTest $ \config ->
   withTestDatabase config $ \database -> do
     name <- liftIO newName
-    assertStatusCodeException
-      (query config database $ "select * from " <> name :: IO [SeriesData])
+    let line = Line name M.empty (M.singleton "value" (Float 42.0)) Nothing
+    post config database line
+    ss :: Results <- query config database $ "select value from " <> name
+    print ss
 
 case_listDatabases :: Assertion
 case_listDatabases = runTest $ \config ->
@@ -209,19 +213,6 @@ case_grant_revoke_database_user = runTest $ \config ->
           ("User is still privileged: " <> T.unpack newUserName)
           (not $ userIsAdmin user)
     deleteUser config newUserName
-
-
-
--------------------------------------------------
-
-data Val = Val Int deriving (Eq, Show)
-
-instance ToSeriesData Val where
-  toSeriesColumns _ = V.fromList ["value"]
-  toSeriesPoints (Val n) = V.fromList [toValue n]
-
-instance FromSeriesData Val where
-  parseSeriesData = withValues $ \values -> Val <$> values .: "value"
 
 -------------------------------------------------
 

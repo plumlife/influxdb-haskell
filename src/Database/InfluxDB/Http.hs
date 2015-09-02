@@ -188,8 +188,7 @@ postGeneric Config {..} databaseName write = do
     makeRequest series = def
       { HC.method = "POST"
       , HC.requestBody = HC.RequestBodyLBS $ formatLines series
-      , HC.path = escapeString $ printf "/write"
-          (T.unpack databaseName)
+      , HC.path = "/write"
       , HC.queryString = escapeString $ printf "u=%s&p=%s&db=%s"
           (T.unpack credsUser)
           (T.unpack credsPassword)
@@ -292,23 +291,19 @@ deleteSeries config databaseName seriesName = runRequest_ config request
 -- The query format is specified in the
 -- <http://influxdb.org/docs/query_language/ InfluxDB Query Language>.
 query
-  :: FromSeries a
-  => Config
+  :: Config
   -> Text -- ^ Database name
   -> Text -- ^ Query text
-  -> IO [a]
+  -> IO Results
 query config databaseName q = do
-  xs <- runRequest config request
-  case mapM fromSeries xs of
-    Left reason -> seriesDecodeError reason
-    Right ys -> return ys
+  runRequest config request
   where
     request = def
-      { HC.path = escapeString $ printf "/db/%s/series"
-          (T.unpack databaseName)
-      , HC.queryString = escapeString $ printf "u=%s&p=%s&q=%s"
+      { HC.path = "/query"
+      , HC.queryString = escapeString $ printf "u=%s&p=%s&db=%s&q=%s"
           (T.unpack credsUser)
           (T.unpack credsPassword)
+          (T.unpack databaseName)
           (T.unpack q)
       }
     Credentials {..} = configCreds config
