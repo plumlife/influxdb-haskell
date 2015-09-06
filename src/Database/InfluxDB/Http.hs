@@ -158,17 +158,17 @@ formatLine line = BL.concat[BL.fromStrict $ TE.encodeUtf8 $ lineMeasurement line
     formatValue (Bool False) = BS8.pack "f"
 
 formatLines :: [Line] -> BL.ByteString
-formatLines x = BL.concat $ fmap formatLine x
+formatLines x = BL.concat $ L.intersperse "\n" $ fmap formatLine x
 
 
 -- | Post a bunch of writes for (possibly multiple) series into a database.
 post
   :: Config
   -> Text
-  -> Line
+  -> [Line]
   -> IO ()
 post config databaseName d =
-  postGeneric config databaseName Nothing [d]
+  postGeneric config databaseName Nothing d
 
 -- | Post a bunch of writes for (possibly multiple) series into a database like
 -- 'post' but with time precision.
@@ -197,14 +197,21 @@ postGeneric Config {..} databaseName prec write = do
       { HC.method = "POST"
       , HC.requestBody = HC.RequestBodyLBS $ formatLines series
       , HC.path = "/write"
-      , HC.queryString = escapeString $ printf formatString
+      , HC.queryString = printFunc
+      }
+    Credentials {..} = configCreds
+    formatString = maybe "u=%s&p=%s&db=%s" (\ _ ->  "u=%s&p=%s&db=%s&precision=%s") prec
+    printFunc =
+      case prec of
+        Just _ -> escapeString $ printf formatString
           (T.unpack credsUser)
           (T.unpack credsPassword)
           (T.unpack databaseName)
           (timePrecString $ fromJust prec)
-      }
-    Credentials {..} = configCreds
-    formatString = maybe "u=%s&p=%s&db=%s" (\ _ ->  "u=%s&p=%s&db=%s&precision=%s") prec
+        Nothing -> escapeString $ printf formatString
+          (T.unpack credsUser)
+          (T.unpack credsPassword)
+          (T.unpack databaseName)
 
 -- | Monad transformer to batch up multiple writes of series to speed up
 -- insertions.
