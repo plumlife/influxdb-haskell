@@ -46,6 +46,7 @@ module Database.InfluxDB.Types
   ) where
 
 import Control.Applicative (empty)
+import Control.DeepSeq
 import Control.Exception (Exception, throwIO)
 import Data.Data (Data)
 import Data.IORef
@@ -147,6 +148,8 @@ data Value
   | Bool !Bool
   | Null
   deriving (Eq, Show, Data, Typeable, Generic)
+
+instance NFData Value
 
 instance A.ToJSON Value where
   toJSON (Int n) = A.toJSON n

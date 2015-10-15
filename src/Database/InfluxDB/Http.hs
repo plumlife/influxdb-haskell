@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -51,6 +52,7 @@ module Database.InfluxDB.Http
   ) where
 
 import Control.Applicative
+import Control.DeepSeq
 import Control.Monad.Identity
 import Control.Monad.Writer
 import Data.DList (DList)
@@ -94,6 +96,8 @@ import Database.InfluxDB.Types.Internal (stripPrefixOptions)
 import Database.InfluxDB.Stream (Stream(..))
 import qualified Database.InfluxDB.Stream as S
 
+import GHC.Generics
+
 -- | Configurations for HTTP API client.
 data Config = Config
   { configCreds :: !Credentials
@@ -133,11 +137,13 @@ data Line = Line {
   lineMeasurement :: Text,
   lineTags :: Map Text Text,
   lineFields :: Map Text Value,
-  linePrecision :: Maybe Int64
-}
+  lineTime :: Maybe Int64
+} deriving (Show,Eq,Generic)
+
+instance NFData Line
 
 formatLine :: Line -> BL.ByteString
-formatLine line = BL.concat[BL.fromStrict $ TE.encodeUtf8 $ lineMeasurement line,formatedTags, " ", formatedValues, maybe "" (\ x -> BL.fromStrict $ BS8.concat[" ", BS8.pack $ show x]) $ linePrecision line]
+formatLine line = BL.concat[BL.fromStrict $ TE.encodeUtf8 $ lineMeasurement line,formatedTags, " ", formatedValues, maybe "" (\ x -> BL.fromStrict $ BS8.concat[" ", BS8.pack $ show x]) $ lineTime line]
   where
     formatedTags =
       case M.null $ lineTags line of
