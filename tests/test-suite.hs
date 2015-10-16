@@ -138,9 +138,20 @@ case_post = runTest $ \config ->
   withTestDatabase config $ \database -> do
     name <- liftIO newName
     let line = Line name M.empty (M.singleton "value" (Float 42.0)) Nothing
-    post config database line
+    post config database [line]
     ss :: Results <- query config database $ "select value from " <> name
     print ss
+
+case_post_multiple :: Assertion
+case_post_multiple = runTest $ \config ->
+  withTestDatabase config $ \database -> do
+    name <- liftIO newName
+    let line = Line name M.empty (M.singleton "value" (Float 42.0)) Nothing
+        line2 = Line name M.empty (M.singleton "value" (Float 40.0)) Nothing
+    post config database [line,line2]
+    ss :: Results <- query config database $ "select value from " <> name
+    print ss
+
 
 case_listDatabases :: Assertion
 case_listDatabases = runTest $ \config ->

@@ -121,14 +121,20 @@ localServer = Server
   }
 
 data TimePrecision
-  = SecondsPrecision
+  = HoursPrecision
+  | MinutesPrecision
+  | SecondsPrecision
   | MillisecondsPrecision
   | MicrosecondsPrecision
+  | NanosecondsPrecision
 
 timePrecString :: TimePrecision -> String
+timePrecString HoursPrecision = "h"
+timePrecString MinutesPrecision = "m"
 timePrecString SecondsPrecision = "s"
 timePrecString MillisecondsPrecision = "ms"
 timePrecString MicrosecondsPrecision = "u"
+timePrecString NanosecondsPrecision = "n"
 
 -----------------------------------------------------------
 -- Writing Data
@@ -158,34 +164,36 @@ formatLine line = BL.concat[BL.fromStrict $ TE.encodeUtf8 $ lineMeasurement line
     formatValue (Bool False) = BS8.pack "f"
 
 formatLines :: [Line] -> BL.ByteString
-formatLines x = BL.concat $ fmap formatLine x
+formatLines x = BL.concat $ L.intersperse "\n" $ fmap formatLine x
 
 
 -- | Post a bunch of writes for (possibly multiple) series into a database.
 post
   :: Config
   -> Text
-  -> Line
+  -> [Line]
   -> IO ()
 post config databaseName d =
-  postGeneric config databaseName [d]
+  postGeneric config databaseName Nothing d
 
 -- | Post a bunch of writes for (possibly multiple) series into a database like
 -- 'post' but with time precision.
 postWithPrecision
   :: Config
   -> Text -- ^ Database name
+  -> TimePrecision
   -> [Line]
   -> IO ()
-postWithPrecision config databaseName =
-  postGeneric config databaseName
+postWithPrecision config databaseName prec =
+  postGeneric config databaseName (Just prec)
 
 postGeneric
   :: Config
   -> Text -- ^ Database name
+  -> Maybe TimePrecision
   -> [Line]
   -> IO ()
-postGeneric Config {..} databaseName write = do
+postGeneric Config {..} databaseName prec write = do
   void $ httpLbsWithRetry configServerPool
     (makeRequest write)
     configHttpManager
@@ -195,12 +203,21 @@ postGeneric Config {..} databaseName write = do
       { HC.method = "POST"
       , HC.requestBody = HC.RequestBodyLBS $ formatLines series
       , HC.path = "/write"
-      , HC.queryString = escapeString $ printf "u=%s&p=%s&db=%s"
+      , HC.queryString = printFunc
+      }
+    Credentials {..} = configCreds
+    formatString = maybe "u=%s&p=%s&db=%s" (\ _ ->  "u=%s&p=%s&db=%s&precision=%s") prec
+    printFunc =
+      case prec of
+        Just _ -> escapeString $ printf formatString
           (T.unpack credsUser)
           (T.unpack credsPassword)
           (T.unpack databaseName)
-      }
-    Credentials {..} = configCreds
+          (timePrecString $ fromJust prec)
+        Nothing -> escapeString $ printf formatString
+          (T.unpack credsUser)
+          (T.unpack credsPassword)
+          (T.unpack databaseName)
 
 -- | Monad transformer to batch up multiple writes of series to speed up
 -- insertions.
