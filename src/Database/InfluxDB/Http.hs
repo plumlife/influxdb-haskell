@@ -143,7 +143,7 @@ data Line = Line {
   lineMeasurement :: Text,
   lineTags :: Map Text Text,
   lineFields :: Map Text Value,
-  lineTime :: Maybe Int64
+  lineTime :: Maybe Integer
 } deriving (Show,Eq,Generic)
 
 instance NFData Line
