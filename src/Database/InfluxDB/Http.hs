@@ -1,11 +1,11 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE NamedFieldPuns             #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE RecordWildCards            #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE TemplateHaskell            #-}
 module Database.InfluxDB.Http
   ( Config(..)
   , Credentials(..), rootCreds
@@ -51,57 +51,58 @@ module Database.InfluxDB.Http
   , ping
   ) where
 
-import Control.Applicative
-import Control.DeepSeq
-import Control.Monad.Identity
-import Control.Monad.Writer
-import Data.DList (DList)
-import Data.IORef
-import Data.Maybe (fromJust)
-import Data.Proxy
-import Data.Text (Text)
-import Data.Vector (Vector)
-import Data.Word (Word32)
-import Network.URI (escapeURIString, isAllowedInURI)
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
-import qualified Data.ByteString.Lazy as BL
-import qualified Data.DList as DL
-import Data.Int
-import qualified Data.List as L
-import Data.Map (Map)
-import qualified Data.Map as M
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
-import Text.Printf (printf)
-import Prelude
+import           Control.Applicative
+import           Control.DeepSeq
+import           Control.Monad.Identity
+import           Control.Monad.Writer
+import qualified Data.ByteString                  as BS
+import qualified Data.ByteString.Char8            as BS8
+import qualified Data.ByteString.Lazy             as BL
+import           Data.DList                       (DList)
+import qualified Data.DList                       as DL
+import           Data.Int                         ()
+import           Data.IORef
+import qualified Data.List                        as L
+import           Data.Map                         (Map)
+import qualified Data.Map                         as M
+import           Data.Maybe                       (fromJust)
+import           Data.Proxy
+import           Data.Text                        (Text)
+import qualified Data.Text                        as T
+import qualified Data.Text.Encoding               as TE
+import           Data.Vector                      (Vector)
+import           Data.Word                        ()
+import           Network.URI                      (escapeURIString,
+                                                   isAllowedInURI)
+import           Prelude
+import           Text.Printf                      (printf)
 
-import Control.Monad.Catch (Handler(..))
-import Control.Retry
-import Data.Aeson ((.=))
-import Data.Aeson.TH (deriveToJSON)
-import Data.Default.Class (Default(def))
-import qualified Data.Aeson as A
-import qualified Data.Aeson.Encode as AE
-import qualified Data.Aeson.Parser as AP
-import qualified Data.Aeson.Types as AT
-import qualified Data.Attoparsec.ByteString as P
-import qualified Data.Attoparsec.ByteString.Lazy as PL
-import qualified Network.HTTP.Client as HC
+import           Control.Monad.Catch              (Handler (..))
+import           Control.Retry
+import           Data.Aeson                       ()
+import qualified Data.Aeson                       as A
+import qualified Data.Aeson.Encode                as AE ()
+import qualified Data.Aeson.Parser                as AP ()
+import           Data.Aeson.TH                    ()
+import qualified Data.Aeson.Types                 as AT ()
+import qualified Data.Attoparsec.ByteString       as P
+import qualified Data.Attoparsec.ByteString.Lazy  as PL ()
+import           Data.Default.Class               (Default (def))
+import qualified Network.HTTP.Client              as HC
 
-import Database.InfluxDB.Decode
-import Database.InfluxDB.Encode
-import Database.InfluxDB.Types
-import Database.InfluxDB.Types.Internal (stripPrefixOptions)
-import Database.InfluxDB.Stream (Stream(..))
-import qualified Database.InfluxDB.Stream as S
+import           Database.InfluxDB.Decode
+import           Database.InfluxDB.Encode
+import           Database.InfluxDB.Stream         (Stream (..))
+import qualified Database.InfluxDB.Stream         as S
+import           Database.InfluxDB.Types
+import           Database.InfluxDB.Types.Internal ()
 
-import GHC.Generics
+import           GHC.Generics                     hiding (prec)
 
 -- | Configurations for HTTP API client.
 data Config = Config
-  { configCreds :: !Credentials
-  , configServerPool :: !(IORef ServerPool)
+  { configCreds       :: !Credentials
+  , configServerPool  :: !(IORef ServerPool)
   , configHttpManager :: !HC.Manager
   }
 
@@ -141,9 +142,9 @@ timePrecString NanosecondsPrecision = "n"
 
 data Line = Line {
   lineMeasurement :: Text,
-  lineTags :: Map Text Text,
-  lineFields :: Map Text Value,
-  lineTime :: Maybe Integer
+  lineTags        :: Map Text Text,
+  lineFields      :: Map Text Value,
+  lineTime        :: Maybe Integer
 } deriving (Show,Eq,Generic)
 
 instance NFData Line
@@ -156,6 +157,10 @@ formatLine line = BL.concat[BL.fromStrict $ TE.encodeUtf8 $ lineMeasurement line
         True -> ""
         False -> BL.concat $ [","] ++ (L.intersperse "," $ fmap (\ (key,value) -> BL.fromStrict $ TE.encodeUtf8 $ T.concat [key,"=",value] ) $ M.toList $ lineTags line)
     formatedValues = BL.concat $ L.intersperse "," $ fmap (\ (key,value) -> BL.concat[BL.fromStrict $ TE.encodeUtf8 key,"=",BL.fromStrict $ formatValue value]) $ M.toList $ lineFields line
+
+    -- NOTE: I added the Null case here but I don't really know what
+    -- the correct return format should be?
+    formatValue Null  = BS8.pack "null"
 
     formatValue (Int val) = BS8.pack $ concat[show val,"i"]
     formatValue (String val) = BS8.pack $ concat ["\"",T.unpack val,"\""]
@@ -234,11 +239,6 @@ newtype PointT p m a = PointT (WriterT (DList (Vector Value)) m a)
     ( Functor, Applicative, Monad, MonadIO, MonadTrans
     , MonadWriter (DList (Vector Value))
     )
-
-runSeriesT :: Monad m => SeriesT m a -> m (a, [Series])
-runSeriesT (SeriesT w) = do
-  (a, series) <- runWriterT w
-  return (a, DL.toList series)
 
 -- | Write a single series data.
 writeSeries
@@ -441,7 +441,7 @@ dropDatabase config databaseName = runRequest_ config request
 listUsers
   :: Config
   -> IO [User]
-listUsers config@Config {..} = do
+listUsers Config {..} = do
   response <- httpLbsWithRetry configServerPool request configHttpManager
   let parsed :: Maybe Results = A.decode $ HC.responseBody response
   case parsed of
@@ -578,8 +578,15 @@ withPool
   -> (HC.Request -> IO a)
   -> IO a
 withPool pool request f = do
-  retryPolicy <- serverRetryPolicy <$> readIORef pool
-  recovering retryPolicy handlers $ do
+  retryPolicy' <- serverRetryPolicy <$> readIORef pool
+
+  -- NOTE: the > 0.7 retry package has a new type for the recovering
+  -- function that /can/ pass in the RetryStatus datatype. I'm
+  -- ignoring it here so we can get this to work.
+  --
+  -- TODO: use the RetryStatus datatype for something useful
+  -- (logging?)
+  recovering retryPolicy' handlers $ \_ -> do
     server <- activeServer pool
     f $ makeRequest server
   where

@@ -1,11 +1,12 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE CPP                 #-}
+{-# LANGUAGE DeriveDataTypeable  #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE NamedFieldPuns      #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TemplateHaskell     #-}
 module Database.InfluxDB.Types
   ( -- * Series, columns and data points
     Series(..)
@@ -45,43 +46,46 @@ module Database.InfluxDB.Types
   , parseDatabase
   ) where
 
-import Control.Applicative (empty)
-import Control.DeepSeq
-import Control.Exception (Exception, throwIO)
-import Data.Data (Data)
-import Data.IORef
-import Data.Int (Int64)
-import Data.Monoid ((<>))
-import Data.Sequence (Seq, ViewL(..), (|>))
-import Data.Text (Text)
-import Data.Typeable (Typeable)
-import Data.Vector (Vector)
-import qualified Data.Vector as V
-import Data.Word (Word32)
-import GHC.Generics (Generic)
-import qualified Data.Sequence as Seq
+import           Control.Applicative              (empty)
+import           Control.DeepSeq
+import           Control.Exception                (Exception, throwIO)
+import           Data.Data                        (Data)
+import           Data.Int                         (Int64)
+import           Data.IORef
+import           Data.Monoid                      ((<>))
+import           Data.Sequence                    (Seq, ViewL (..), (|>))
+import qualified Data.Sequence                    as Seq
+import           Data.Text                        (Text)
+import           Data.Typeable                    (Typeable)
+import           Data.Vector                      (Vector)
+import qualified Data.Vector                      as V
+import           Data.Word                        (Word32)
+import           GHC.Generics                     (Generic)
 
-import Control.Retry (RetryPolicy(..), limitRetries, exponentialBackoff)
-import Data.Aeson ((.=), (.:))
-import Data.Aeson.TH
-import Data.Aeson.Types (Parser)
-import qualified Data.Aeson as A
+import           Control.Retry                    (RetryPolicy,
+                                                   RetryPolicyM (..),
+                                                   exponentialBackoff,
+                                                   limitRetries)
+import           Data.Aeson                       ((.:), (.=))
+import qualified Data.Aeson                       as A
+import           Data.Aeson.TH
+import           Data.Aeson.Types                 (Parser)
 
-import Database.InfluxDB.Types.Internal (stripPrefixOptions)
+import           Database.InfluxDB.Types.Internal (stripPrefixOptions)
 
-import Debug.Trace
+import           Debug.Trace
 
 #if MIN_VERSION_aeson(0, 7, 0)
-import Data.Scientific
+import           Data.Scientific
 #else
-import Data.Attoparsec.Number
+import           Data.Attoparsec.Number
 #endif
 
 -----------------------------------------------------------
 -- Compatibility for older GHC
 
 #if __GLASGOW_HASKELL__ < 706
-import Control.Exception (evaluate)
+import           Control.Exception                (evaluate)
 
 atomicModifyIORef' :: IORef a -> (a -> (a, b)) -> IO b
 atomicModifyIORef' ref f = do
@@ -135,7 +139,7 @@ instance A.FromJSON Series where
 -- | 'SeriesData' consists of columns and points.
 data SeriesData = SeriesData
   { seriesDataColumns :: Vector Column
-  , seriesDataPoints :: [Vector Value]
+  , seriesDataPoints  :: [Vector Value]
   } deriving (Eq, Show, Typeable, Generic)
 
 type Column = Text
@@ -195,7 +199,7 @@ instance A.FromJSON Value where
 
 -- | User credentials.
 data Credentials = Credentials
-  { credsUser :: !Text
+  { credsUser     :: !Text
   , credsPassword :: !Text
   } deriving (Show, Typeable, Generic)
 
@@ -204,19 +208,19 @@ data Server = Server
   { serverHost :: !Text
   -- ^ Hostname or IP address
   , serverPort :: !Int
-  , serverSsl :: !Bool
+  , serverSsl  :: !Bool
   -- ^ SSL is enabled or not in the server side
   } deriving (Show, Typeable, Generic)
 
 -- | Non-empty set of server locations. The active server will always be used
 -- until any HTTP communications fail.
 data ServerPool = ServerPool
-  { serverActive :: !Server
+  { serverActive      :: !Server
   -- ^ Current active server
-  , serverBackup :: !(Seq Server)
+  , serverBackup      :: !(Seq Server)
   -- ^ The rest of the servers in the pool.
-  , serverRetryPolicy :: !RetryPolicy
-  } deriving (Typeable, Generic)
+  , serverRetryPolicy :: RetryPolicy
+  } deriving (Typeable)
 
 {-# DEPRECATED serverRetrySettings "Use serverRetryPolicy instead" #-}
 serverRetrySettings :: ServerPool -> RetryPolicy
@@ -239,7 +243,7 @@ parseDatabase = A.withObject "results" $ \ o -> do
 
 -- | User
 data User = User
-  { userName :: Text
+  { userName    :: Text
   , userIsAdmin :: Bool
   } deriving (Show, Typeable, Generic)
 
@@ -255,18 +259,18 @@ newtype Ping = Ping
 type Interface = Text
 
 data ShardSpace = ShardSpace
-  { shardSpaceDatabase :: Maybe Text
-  , shardSpaceName :: Text
-  , shardSpaceRegex :: Text
-  , shardSpaceRetentionPolicy :: Text
-  , shardSpaceShardDuration :: Text
+  { shardSpaceDatabase          :: Maybe Text
+  , shardSpaceName              :: Text
+  , shardSpaceRegex             :: Text
+  , shardSpaceRetentionPolicy   :: Text
+  , shardSpaceShardDuration     :: Text
   , shardSpaceReplicationFactor :: Word32
-  , shardSpaceSplit :: Word32
+  , shardSpaceSplit             :: Word32
   } deriving (Show, Typeable, Generic)
 
 data Results = Results{
   resultsResults :: [SeriesWrapper],
-  resultsError :: Maybe Text
+  resultsError   :: Maybe Text
 } deriving (Show, Typeable, Generic)
 
 
@@ -275,10 +279,10 @@ data SeriesWrapper = SeriesWrapper {
 } deriving (Show, Typeable, Generic)
 
 data NewSeries = NewSeries{
-  newseriesName :: Maybe Text,
-  newseriesTags :: Maybe [(Text,Text)],
+  newseriesName    :: Maybe Text,
+  newseriesTags    :: Maybe [(Text,Text)],
   newseriesColumns :: Maybe [Text],
-  newseriesValues :: [[Value]]
+  newseriesValues  :: [[Value]]
 } deriving (Show, Typeable, Generic)
 
 -----------------------------------------------------------
@@ -289,6 +293,7 @@ data NewSeries = NewSeries{
 newServerPool :: Server -> [Server] -> IO (IORef ServerPool)
 newServerPool = newServerPoolWithRetrySettings defaultRetryPolicy
   where
+    defaultRetryPolicy :: forall m. Monad m => RetryPolicyM m
     defaultRetryPolicy = limitRetries 5 <> exponentialBackoff 50
 
 newServerPoolWithRetryPolicy
